@@ -5,15 +5,43 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 )
+
+// create a map with string keys and slice of bytes.
+var cache = make(map[string][]byte)
+
+// a mutex to protect cache from concurrent access.
+var mutex = &sync.RWMutex{}
 
 // proxyHandler is a function that will receive the original request and forward it to our target service.
 // writer is the tool we will use to write our response back to the user.
 // request contains all the information about the user's incoming request
 func proxyHandler(writer http.ResponseWriter, request *http.Request) {
 	// define our target url to forward our requests to.
-	targetUrl := "https://httpbin.org"
 
+	// create the cache key using the url string
+	cacheKey := request.URL.String()
+
+	// lock the reader to safely read the cache
+	mutex.RLock()
+	// now we check the cache to see if the key already exists
+	cachedResponse, found := cache[cacheKey]
+	mutex.RUnlock()
+
+	if found {
+		log.Println("Cache HIT for key:", cacheKey)
+
+		// if the cached response is already in the map , return it, no need proxy.
+		writer.Write(cachedResponse)
+		return
+	}
+
+	// if not in cache, proxy the request
+
+	log.Println("Cache MISS for key:", cacheKey, ". Forwarding request...")
+	// the underscore means that there is a possible error variable value there , but we dont need it, so throw it away.
+	targetUrl := "https://httpbin.org"
 	target, _ := url.Parse(targetUrl)
 	target.Path = request.URL.Path
 	target.RawQuery = request.URL.RawQuery
@@ -43,8 +71,22 @@ func proxyHandler(writer http.ResponseWriter, request *http.Request) {
 		log.Println("Error forwarding request:", err)
 		return
 	}
-	// important to close the response body when done with it
+
+	// close the response body when done with it
 	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(writer, "Error reading response body", http.StatusInternalServerError)
+		return
+	}
+
+	mutex.Lock()
+
+	// store into cache map
+	cache[cacheKey] = body
+
+	mutex.Unlock()
 
 	// copy the status code from the target's response to our own response
 	writer.WriteHeader(resp.StatusCode)
@@ -56,8 +98,8 @@ func proxyHandler(writer http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	// copy the body from the target's response to our own response.
-	io.Copy(writer, resp.Body)
+	// write the body
+	writer.Write(body)
 
 }
 
